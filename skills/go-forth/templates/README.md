@@ -117,17 +117,21 @@ closest to delivering value, and PRs rot while their branch drifts from its base
 | Phase | Move forward means | Then |
 |---|---|---|
 | `0-open` | write the spec: goal, acceptance criteria, constraints — **and get `ready-for-implementation:` set** | → `1-active` |
-| `1-active` | implement it, open the PR against `target-branch` | → `2-ai-review` |
-| `2-ai-review` | run code review, address findings | → `3-human-review` |
-| `3-human-review` | poll the PR for human comments, respond, push fixes | → `4-closed` |
+| `1-active` | implement it (commit to `branch:`, push, but **no PR yet**) | → `2-ai-review` |
+| `2-ai-review` | review the code **locally** — diff the branch against `target-branch`, not a GitHub PR — address findings | → `3-human-review` |
+| `3-human-review` | **open the PR against `target-branch`**, then poll it for human comments, respond, push fixes | → `4-closed` |
 
 A spec being *sufficient* and a spec being *ready-for-implementation* are two
 different gates — see below.
 
-`3-human-review` means review is happening on an **external system** (the GitHub
-PR). The owner is still an agent — its job is *responding* to review, not waiting
-passively. That is why `pr:` and `branch:` are load-bearing: they are all a fresh
-agent has to go on.
+**No PR exists before `3-human-review`.** `1-active` and `2-ai-review` both work
+against the pushed branch directly (`git diff origin/<target-branch>...<branch>`
+or an equivalent local diff) — a human should never see a slug's code on GitHub
+until an agent has already judged it spec-complete. `3-human-review` means
+review is happening on an **external system** (the GitHub PR) for the first
+time. The owner is still an agent — its job is *responding* to review, not
+waiting passively. That is why `pr:` and `branch:` are load-bearing: they are
+all a fresh agent has to go on.
 
 ### Cooldown
 

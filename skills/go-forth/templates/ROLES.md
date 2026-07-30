@@ -103,7 +103,10 @@ append mechanics and why they're enforced by a hook.
 believe the specification is satisfied.
 
 **Not this role's job:** renegotiating the goal, expanding scope beyond the spec, or
-opening the PR.
+opening the PR. **Push the branch, but do not open a PR** — `2-ai-review` reviews
+it locally off the pushed branch, and a PR exists for the first time only once a
+slug reaches `3-human-review`. Record `branch:` in the front matter so the next
+agent (this role again, if it bounces back, or the reviewer) knows where to look.
 
 ---
 
@@ -115,6 +118,13 @@ the right shape for whatever happens next.
 The review agent reads the implementation as edited by the `1-active` agent and
 reviews it **against the goals laid out in the specification** — not against its own
 taste in architecture, and not as an open-ended bug hunt of the whole repo.
+
+**No PR exists yet at this phase.** Read the code off the pushed `branch:` —
+`git diff origin/<target-branch>...<branch>` (or a checkout of the branch) — not
+`gh pr diff`. If a PR is already open when this slug is claimed, that's a sign
+an earlier pass got ahead of the process; review it anyway, but don't push
+further commits to it from here — this role's job is routing findings back to
+`1-active`, not fixing code or managing the PR.
 
 It has write access to the slug doc, in both directions:
 
