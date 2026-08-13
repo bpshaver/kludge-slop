@@ -1,0 +1,190 @@
+#!/bin/bash
+# Opens a zellij floating pane running `hunk diff` scoped to the given files.
+#
+#   hunk-pane src/foo.py src/bar.py
+#   hunk-pane --staged src/foo.py
+#   hunk-pane --hunk-arg --mode=stack src/foo.py
+#   hunk-pane --capture /tmp/review.json src/foo.py
+#
+# A hunk session lives only as long as its TUI: comments vanish the moment the
+# pane closes. --capture polls the live session and keeps the last snapshot on
+# disk, so an agent can read the comments after you have quit.
+#
+# Zellij is switched to locked mode while the pane is up, so Ctrl+S (save note
+# draft, which hunk will not let you remap) reaches hunk instead of opening
+# scroll mode; normal mode comes back when the session ends. If that watcher is
+# ever killed outright, Ctrl+G unlocks by hand.
+#
+# Flags (consumed by this script, everything else is a file path):
+#   --staged             review staged changes instead of the working tree
+#   --watch              auto-reload the pane when the diff changes
+#   --target REF         diff against a ref/revset instead of the working tree
+#   --hunk-arg ARG       pass ARG through to `hunk diff` (repeatable)
+#   --name NAME          floating pane title (default: hunk <first file>)
+#   --width/--height N   floating pane size, e.g. 90% or 120 (default 90%/85%)
+#   --hold               keep the pane open after hunk exits
+#   --no-lock            leave zellij's own keybindings live (see below)
+#   --capture FILE       mirror the session's comments to FILE while it lives
+#   --capture-every SECS poll interval for --capture (default 2)
+#   --dry-run            print the zellij command instead of running it
+
+set -u
+
+hunk_args=()
+files=()
+target=''
+pane_name=''
+width='90%'
+height='85%'
+close_on_exit=1
+dry_run=0
+capture_file=''
+capture_every=2
+lock=1
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --staged | --cached | --watch | --exclude-untracked)
+      hunk_args+=("$1"); shift ;;
+    --target) target=${2:-}; shift 2 ;;
+    --hunk-arg) hunk_args+=("${2:-}"); shift 2 ;;
+    --name) pane_name=${2:-}; shift 2 ;;
+    --width) width=${2:-}; shift 2 ;;
+    --height) height=${2:-}; shift 2 ;;
+    --hold) close_on_exit=0; shift ;;
+    --lock) lock=1; shift ;;
+    --no-lock) lock=0; shift ;;
+    --capture) capture_file=${2:-}; shift 2 ;;
+    --capture-every) capture_every=${2:-2}; shift 2 ;;
+    --dry-run) dry_run=1; shift ;;
+    -h | --help)
+      awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
+    --) shift; while [ $# -gt 0 ]; do files+=("$1"); shift; done ;;
+    *) files+=("$1"); shift ;;
+  esac
+done
+
+if [ ${#files[@]} -eq 0 ]; then
+  echo "hunk-pane: no files given" >&2
+  exit 2
+fi
+
+if [ -z "${ZELLIJ:-}" ]; then
+  echo "hunk-pane: not inside a zellij session" >&2
+  exit 1
+fi
+command -v zellij >/dev/null 2>&1 || { echo "hunk-pane: zellij not found" >&2; exit 1; }
+command -v hunk >/dev/null 2>&1 || { echo "hunk-pane: hunk not found" >&2; exit 1; }
+
+# The pane starts in $PWD, but a caller may pass paths relative to a different
+# directory; absolutize what exists on disk so the pathspecs always resolve.
+abs_files=()
+for f in "${files[@]}"; do
+  if [ -e "$f" ]; then
+    case $f in
+      /*) abs_files+=("$f") ;;
+      *) abs_files+=("$PWD/$f") ;;
+    esac
+  else
+    # Deleted file, or a glob pathspec — hand it to hunk/git untouched.
+    abs_files+=("$f")
+  fi
+done
+
+[ -n "$pane_name" ] || pane_name="hunk $(basename "${files[0]}")$([ ${#files[@]} -gt 1 ] && echo " +$((${#files[@]} - 1))")"
+
+cmd=(zellij action new-pane --floating --cwd "$PWD" --name "$pane_name"
+     --width "$width" --height "$height")
+[ "$close_on_exit" -eq 1 ] && cmd+=(--close-on-exit)
+cmd+=(-- hunk diff)
+[ -n "$target" ] && cmd+=("$target")
+[ ${#hunk_args[@]} -gt 0 ] && cmd+=("${hunk_args[@]}")
+cmd+=(-- "${abs_files[@]}")
+
+if [ "$dry_run" -eq 1 ]; then
+  printf '%q ' "${cmd[@]}"; printf '\n'
+  exit 0
+fi
+
+if [ -z "$capture_file" ] && [ "$lock" -eq 0 ]; then
+  exec "${cmd[@]}"
+fi
+
+case $capture_every in
+  '' | *[!0-9]*) capture_every=2 ;;
+esac
+[ "$capture_every" -ge 1 ] 2>/dev/null || capture_every=1
+if [ -n "$capture_file" ]; then
+  case $capture_file in
+    /*) : ;;
+    *) capture_file="$PWD/$capture_file" ;;
+  esac
+fi
+
+session_ids() {
+  hunk session list --json 2>/dev/null |
+    grep -o '"sessionId"[[:space:]]*:[[:space:]]*"[^"]*"' |
+    sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+# Snapshot the sessions that already exist, so the one this pane spawns can be
+# told apart from any other hunk running against the same repo.
+before=$(session_ids)
+
+"${cmd[@]}" || exit $?
+
+# Zellij's own chords (Ctrl+s -> scroll mode) would otherwise swallow the
+# Ctrl+S that saves a note draft, since hunk treats it as a text-input key and
+# refuses to remap it. Locked mode hands every key to the pane.
+[ "$lock" -eq 1 ] && zellij action switch-mode locked >/dev/null 2>&1
+
+sid=''
+for _ in $(seq 1 40); do
+  for candidate in $(session_ids); do
+    case "
+$before
+" in
+      *"
+$candidate
+"*) : ;;
+      *) sid=$candidate; break 2 ;;
+    esac
+  done
+  sleep 0.25
+done
+
+if [ -z "$sid" ]; then
+  # Without a session id nothing can tell when the pane closes, so locked mode
+  # would strand the session. Give the keys back rather than risk that.
+  [ "$lock" -eq 1 ] && zellij action switch-mode normal >/dev/null 2>&1
+  echo "hunk-pane: pane opened, but no new hunk session appeared — not capturing" >&2
+  exit 0
+fi
+
+# Watch the session until the TUI exits: mirror its comments to disk (the
+# session dies with the pane, so the file holds the last successful poll —
+# comments written in the final $capture_every seconds can still be missed) and
+# hand the keyboard back to zellij once it is gone.
+tmp="${capture_file:-/dev/null}.tmp.$$"
+(
+  deadline=$((SECONDS + 28800))
+  while hunk session get "$sid" --json >/dev/null 2>&1; do
+    if [ -n "$capture_file" ] &&
+       out=$(hunk session comment list "$sid" --type all --json 2>/dev/null); then
+      printf '%s\n' "$out" >"$tmp" 2>/dev/null && mv -f "$tmp" "$capture_file" 2>/dev/null
+    fi
+    [ "$SECONDS" -ge "$deadline" ] && break
+    sleep "$capture_every"
+  done
+  [ -n "$capture_file" ] && rm -f "$tmp"
+  # Another hunk-pane may still be up and needing the keys; leave it locked.
+  if [ "$lock" -eq 1 ] && [ -z "$(session_ids)" ]; then
+    zellij action switch-mode normal >/dev/null 2>&1
+  fi
+) >/dev/null 2>&1 &
+disown 2>/dev/null || true
+
+msg="hunk-pane: session $sid"
+[ "$lock" -eq 1 ] && msg="$msg -> zellij locked until it closes"
+[ -n "$capture_file" ] && msg="$msg -> capturing comments to $capture_file"
+echo "$msg" >&2
