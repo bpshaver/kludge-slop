@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Poll an ntfy topic until a human answer arrives. Prints the answer text.
+# Exit 0 = answered, 2 = timed out.
+# Run this with Bash run_in_background so the session stays alive and you get
+# exactly one completion notification.
+set -euo pipefail
+
+SINCE=""; TOPIC=""; TIMEOUT=7200; INTERVAL=10
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --topic)    TOPIC="$2"; shift 2;;
+    --timeout)  TIMEOUT="$2"; shift 2;;
+    --interval) INTERVAL="$2"; shift 2;;
+    -h|--help)
+      echo 'usage: ntfy-wait <since-message-id> [--topic T] [--timeout SECONDS] [--interval SECONDS]'
+      exit 0;;
+    *) SINCE="$1"; shift;;
+  esac
+done
+[ -n "$SINCE" ] || { echo "ntfy-wait: pass the message id printed by ntfy-ask" >&2; exit 64; }
+
+if [ -z "$TOPIC" ]; then TOPIC="${NTFY_TOPIC:-}"; fi
+if [ -z "$TOPIC" ] && [ -r "$HOME/.claude/ntfy-topic" ]; then
+  TOPIC="$(tr -d '[:space:]' < "$HOME/.claude/ntfy-topic")"
+fi
+[ -n "$TOPIC" ] || { echo "ntfy-wait: no topic. Pass --topic, set NTFY_TOPIC, or write ~/.claude/ntfy-topic" >&2; exit 78; }
+
+deadline=$(( $(date +%s) + TIMEOUT ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  # since=<id> is exclusive, so the question itself never comes back.
+  # Anything carrying a title or actions is another agent's question, not an answer.
+  ans="$(curl -sf --max-time 20 "https://ntfy.sh/${TOPIC}/json?poll=1&since=${SINCE}" 2>/dev/null \
+        | jq -rs '[.[]
+                   | select(.event == "message")
+                   | select(has("title") | not)
+                   | select(has("actions") | not)
+                   | .message] | .[0] // empty' 2>/dev/null)" || true
+  if [ -n "$ans" ]; then printf '%s\n' "$ans"; exit 0; fi
+  sleep "$INTERVAL"
+done
+
+echo "ntfy-wait: no answer on $TOPIC after ${TIMEOUT}s" >&2
+exit 2

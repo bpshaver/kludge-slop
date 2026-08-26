@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# One long-lived listener for a topic. Prints one line per human answer, forever.
+# Start it ONCE per session under Monitor with persistent: true. Every question's
+# answer arrives through this one watch. It costs no tokens while the topic is quiet.
+set -euo pipefail
+
+TOPIC=""; INTERVAL=10
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --topic)    TOPIC="$2"; shift 2;;
+    --interval) INTERVAL="$2"; shift 2;;
+    -h|--help)  echo 'usage: ntfy-listen [--topic T] [--interval SECONDS]'; exit 0;;
+    *) echo "ntfy-listen: unknown argument: $1" >&2; exit 64;;
+  esac
+done
+
+if [ -z "$TOPIC" ]; then TOPIC="${NTFY_TOPIC:-}"; fi
+if [ -z "$TOPIC" ] && [ -r "$HOME/.claude/ntfy-topic" ]; then
+  TOPIC="$(tr -d '[:space:]' < "$HOME/.claude/ntfy-topic")"
+fi
+[ -n "$TOPIC" ] || { echo "ntfy-listen: no topic. Pass --topic, set NTFY_TOPIC, or write ~/.claude/ntfy-topic" >&2; exit 78; }
+
+# One listener per topic, enforced. A second one would double every event.
+LOCK="$HOME/.claude/.ntfy-listen-${TOPIC}.lock"
+if [ -r "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
+  echo "ntfy-listen: already listening to $TOPIC (pid $(cat "$LOCK")). Use that watch; do not start a second." >&2
+  exit 75
+fi
+echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT INT TERM
+
+echo "ntfy-listen: watching $TOPIC" >&2
+SINCE="$(date +%s)"
+while :; do
+  batch="$(curl -sf --max-time 20 "https://ntfy.sh/${TOPIC}/json?poll=1&since=${SINCE}" 2>/dev/null || true)"
+  if [ -n "$batch" ]; then
+    # Skip anything with a title or actions — that is an agent's question, not an answer.
+    printf '%s\n' "$batch" | jq -rs '.[]
+      | select(.event == "message")
+      | select(has("title") | not)
+      | select(has("actions") | not)
+      | "ANSWER: \(.message)"' 2>/dev/null || true
+    last="$(printf '%s\n' "$batch" | jq -rs '[.[] | select(.event == "message") | .time] | max // empty' 2>/dev/null || true)"
+    [ -n "$last" ] && SINCE=$(( last + 1 ))
+  fi
+  sleep "$INTERVAL"
+done

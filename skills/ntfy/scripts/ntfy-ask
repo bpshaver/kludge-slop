@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Publish one multiple-choice question to an ntfy topic. Prints the message id.
+# The id is what you pass to ntfy-wait, so only later messages count as answers.
+set -euo pipefail
+
+TOPIC=""; TITLE=""; BODY=""; LINK=""; PLATFORM=""; FORCE=""; DRY=""; BTNS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --topic) TOPIC="$2"; shift 2;;
+    --title) TITLE="$2"; shift 2;;
+    --body)  BODY="$2";  shift 2;;
+    --link)  LINK="$2";  shift 2;;
+    --btn)   BTNS+=("$2"); shift 2;;
+    --platform) PLATFORM="$2"; shift 2;;
+    --force) FORCE=1; shift;;
+    --dry-run) DRY=1; shift;;
+    -h|--help)
+      sed -n '2,4p' "$0"; echo
+      echo 'usage: ntfy-ask --title T --body B [--btn KEY:Label]... [--link URL] [--topic T]'
+      exit 0;;
+    *) echo "ntfy-ask: unknown argument: $1" >&2; exit 64;;
+  esac
+done
+
+if [ -z "$TOPIC" ]; then TOPIC="${NTFY_TOPIC:-}"; fi
+if [ -z "$TOPIC" ] && [ -r "$HOME/.claude/ntfy-topic" ]; then
+  TOPIC="$(tr -d '[:space:]' < "$HOME/.claude/ntfy-topic")"
+fi
+[ -n "$TOPIC" ] || { echo "ntfy-ask: no topic. Pass --topic, set NTFY_TOPIC, or write ~/.claude/ntfy-topic" >&2; exit 78; }
+
+if [ -z "$PLATFORM" ]; then PLATFORM="${NTFY_PLATFORM:-}"; fi
+if [ -z "$PLATFORM" ] && [ -r "$HOME/.claude/ntfy-platform" ]; then
+  PLATFORM="$(tr '[:upper:]' '[:lower:]' < "$HOME/.claude/ntfy-platform" | tr -d '[:space:]')"
+fi
+# Unknown platform gets the strict rules. iOS cannot type a reply; assuming it can
+# is the failure that leaves a question unanswerable.
+[ -n "$PLATFORM" ] || PLATFORM="ios"
+
+[ -n "$TITLE" ] || { echo "ntfy-ask: --title is required" >&2; exit 64; }
+[ -n "$BODY" ]  || { echo "ntfy-ask: --body is required" >&2; exit 64; }
+
+# Hard caps. The topic is a public feed and the notification is read on a phone.
+if [ "${#TITLE}" -gt 120 ]; then
+  echo "ntfy-ask: title is ${#TITLE} chars, max 120. Shorten the question." >&2; exit 64
+fi
+if [ "${#BODY}" -gt 1000 ]; then
+  echo "ntfy-ask: body is ${#BODY} chars, max 1000. Move the detail into a GitHub issue and pass --link." >&2; exit 64
+fi
+if [ "${#BTNS[@]}" -gt 3 ]; then
+  echo "ntfy-ask: ${#BTNS[@]} buttons, but a question gets 3 ways forward, no more. Cut it down or split it into two questions." >&2; exit 64
+fi
+
+ACTIONS=""; KEYS=" "
+for b in ${BTNS[@]+"${BTNS[@]}"}; do
+  key="${b%%:*}"; label="${b#*:}"
+  [ "$label" = "$b" ] && label="$key"
+  case "$key$label" in
+    *,*|*\;*) echo "ntfy-ask: button '$b' contains , or ; which breaks the Actions header" >&2; exit 64;;
+  esac
+  [ -n "$ACTIONS" ] && ACTIONS="$ACTIONS; "
+  ACTIONS="${ACTIONS}http, ${key} - ${label}, https://ntfy.sh/${TOPIC}, body=${key}"
+  KEYS="${KEYS}${key} "
+done
+
+# On iOS the ntfy app has no compose field. Buttons are the only way to answer,
+# so a question with no buttons — or an option with no button — is unanswerable.
+if [ "$PLATFORM" = "ios" ]; then
+  if [ "${#BTNS[@]}" -eq 0 ]; then
+    echo "ntfy-ask: no buttons. iOS has no compose field, so the user cannot type a reply. Give the question buttons." >&2
+    exit 64
+  fi
+  MISSING=""
+  while IFS= read -r line; do
+    k="$(printf '%s' "$line" | sed -n 's/^\([A-Za-z][A-Za-z]*\)).*/\1/p')"
+    [ -z "$k" ] && continue
+    case "$KEYS" in *" $k "*) ;; *) MISSING="$MISSING $k";; esac
+  done <<BODY_EOF
+$BODY
+BODY_EOF
+  if [ -n "$MISSING" ]; then
+    echo "ntfy-ask: body offers$MISSING with no button. On iOS that option cannot be picked. Give it a button or cut it." >&2
+    exit 64
+  fi
+fi
+
+# Every message ends with the topic URL. On iOS the app cannot compose a reply,
+# so this link is the user's one tap to the web app when they want to say
+# something three buttons do not cover. Appended after the length check — it does
+# not count against the body budget.
+BODY="${BODY}
+
+Type a reply: https://ntfy.sh/${TOPIC}"
+
+# Consecutive questions must use different answer keys. A late tap on a settled
+# question arrives as bare text with nothing tying it to a question, so reusing
+# A/B/C back to back makes the new answer unreadable. Rotate A/B/C -> D/E/F.
+KEYFILE="$HOME/.claude/.ntfy-keys-${TOPIC}"
+if [ -z "$FORCE" ] && [ -r "$KEYFILE" ]; then
+  PREV_KEYS=" $(tr -d '\n' < "$KEYFILE") "
+  CLASH=""
+  for k in $KEYS; do
+    case "$PREV_KEYS" in *" $k "*) CLASH="$CLASH $k";; esac
+  done
+  if [ -n "$CLASH" ]; then
+    echo "ntfy-ask: key(s)$CLASH were used by the previous question. A late tap on it would be unreadable. Use different letters (A/B/C -> D/E/F), or --force if that question can no longer be answered." >&2
+    exit 70
+  fi
+fi
+
+# One question in flight at a time. Answers carry no reference to what they
+# answer, so a second question makes both replies ambiguous.
+OPEN="$HOME/.claude/.ntfy-open-${TOPIC}"
+if [ -z "$FORCE" ] && [ -r "$OPEN" ]; then
+  PREV="$(tr -d '[:space:]' < "$OPEN")"
+  if [ -n "$PREV" ]; then
+    PREV_ANS="$(curl -sf --max-time 20 "https://ntfy.sh/${TOPIC}/json?poll=1&since=${PREV}" 2>/dev/null \
+      | jq -rs '[.[] | select(.event == "message") | select(has("title") | not)
+                 | select(has("actions") | not) | .message] | .[0] // empty' 2>/dev/null || true)"
+    if [ -z "$PREV_ANS" ]; then
+      echo "ntfy-ask: question $PREV is still unanswered. Two in flight cannot be told apart — wait for it, or pass --force to replace it." >&2
+      exit 69
+    fi
+  fi
+fi
+
+set -- -s -H "Title: $TITLE"
+[ -n "$ACTIONS" ] && set -- "$@" -H "Actions: $ACTIONS"
+[ -n "$LINK" ]    && set -- "$@" -H "Click: $LINK"
+
+echo "ntfy-ask: topic=$TOPIC" >&2
+# --dry-run runs every check above, then shows the message instead of sending it.
+# Use it to test this script. A test that posts wakes the user up.
+if [ -n "$DRY" ]; then
+  echo "DRY RUN - nothing sent, no state written"
+  echo "topic:  $TOPIC"
+  echo "title:  $TITLE"
+  [ -n "$ACTIONS" ] && echo "actions: $ACTIONS"
+  [ -n "$LINK" ] && echo "click:  $LINK"
+  echo "body:"
+  printf '%s\n' "$BODY"
+  exit 0
+fi
+
+ID="$(curl "$@" -d "$BODY" "ntfy.sh/$TOPIC" | jq -r '.id')"
+printf '%s\n' "$ID" > "$OPEN"
+printf '%s\n' "$KEYS" > "$KEYFILE"
+printf '%s\n' "$ID"
