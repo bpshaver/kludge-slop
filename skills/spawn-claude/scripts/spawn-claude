@@ -1,0 +1,55 @@
+#!/bin/bash
+# Pop-up front-end for starting a named Claude Code session in a new Zellij tab.
+# Bound to Ctrl+A in ~/.config/zellij/config.kdl, which runs it in a floating pane.
+# Uses gum to ask for the tab name, model, and first prompt, then opens the tab
+# without moving focus, and exits so the floating pane closes.
+#
+# Usage:
+#   spawn-claude                # ask for everything
+#   spawn-claude [--cwd <dir>]  # working dir for the new session (default: $PWD,
+#                               # which under a Zellij Run binding is the cwd of
+#                               # the pane that had focus)
+#
+# Escape at any gum prompt cancels the whole thing.
+
+set -euo pipefail
+
+cwd="$PWD"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cwd) cwd="$2"; shift 2 ;;
+    *) echo "spawn-claude: unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "${ZELLIJ:-}" ]; then
+  echo "spawn-claude: not inside a Zellij session (\$ZELLIJ unset)" >&2; exit 3
+fi
+if ! [ -d "$cwd" ]; then
+  echo "spawn-claude: --cwd is not a directory: $cwd" >&2; exit 2
+fi
+if ! command -v gum >/dev/null; then
+  echo "spawn-claude: gum is not installed (brew install gum)" >&2; exit 4
+fi
+
+gum style --bold --foreground 212 "New Claude session" \
+  && gum style --faint "cwd: $cwd"
+
+default_name="$(basename "$cwd")-$(date +%H%M)"
+name="$(gum input --header "Tab / session name" --placeholder "$default_name" --value "")"
+name="${name:-$default_name}"
+
+# Model aliases. `claude --model <alias>` resolves each to the latest model in that
+# family, so nothing here pins a version.
+model="$(printf '%s\n' default fable opus sonnet haiku \
+  | gum filter --header "Model (type to fuzzy-find)" --placeholder "default" --height 8)"
+[ "$model" = default ] && model=""
+
+prompt="$(gum write --header "First prompt (Ctrl+D to finish, empty for none)" \
+  --placeholder "What should this session do?" --width 100 --height 10)"
+
+claude_args=(claude --name "$name")
+[ -n "$model" ] && claude_args+=(--model "$model")
+[ -n "$prompt" ] && claude_args+=("$prompt")
+
+zellij action new-tab --close-on-exit --no-focus --name "$name" --cwd "$cwd" -- "${claude_args[@]}" >/dev/null

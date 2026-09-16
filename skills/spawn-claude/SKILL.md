@@ -75,3 +75,34 @@ zellij action new-tab --close-on-exit --no-focus --name "$name" --cwd "$cwd" \
 - Cross-session messages to the new session are read at its next tool round. A
   session busy on its first prompt will pick them up; one sitting idle at an
   empty prompt may not until someone types. Put the task in the prompt.
+
+## For humans: `spawn-claude` on a hotkey
+
+`scripts/spawn-claude` is the interactive counterpart to `spawn.sh`. It uses
+[`gum`](https://github.com/charmbracelet/gum) to ask for the tab name, a model
+alias (fuzzy-filtered over `default`, `fable`, `opus`, `sonnet`, `haiku`), and the
+first prompt, then opens the tab with `--no-focus` exactly as `spawn.sh` does. The
+one name you type becomes both the Zellij tab name and the Claude session name.
+Escape at any prompt cancels.
+
+Copy it onto your `PATH` (for example `~/.local/bin/spawn-claude`) and bind it to
+a key in `~/.config/zellij/config.kdl` under `keybinds { normal { ... } }`:
+
+```kdl
+bind "Ctrl a" {
+    Run "zsh" "-ic" "spawn-claude" {
+        close_on_exit true
+        floating true
+        x "20%"
+        y "20%"
+        width "60%"
+        height "60%"
+    }
+}
+```
+
+The floating pane inherits the cwd of the pane that had focus, so the new session
+starts in the repo you were looking at. The pane closes when the script exits.
+Binding `Ctrl a` in normal mode means the shell no longer receives it, so
+`beginning-of-line` in the line editor stops working inside Zellij; pick another
+key if you rely on it. Requires `brew install gum`.
