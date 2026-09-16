@@ -10,10 +10,16 @@
 # pane closes. --capture polls the live session and keeps the last snapshot on
 # disk, so an agent can read the comments after you have quit.
 #
-# Zellij is switched to locked mode while the pane is up, so Ctrl+S (save note
-# draft, which hunk will not let you remap) reaches hunk instead of opening
-# scroll mode; normal mode comes back when the session ends. If that watcher is
-# ever killed outright, Ctrl+G unlocks by hand.
+# The pane opens in the tab of the pane that ran this script, not the tab the
+# user happens to be looking at, so a background agent cannot cover someone
+# else's work. Tell the user which tab it landed in; the script prints it.
+#
+# Zellij's mode is left alone. Locked mode is per-client, not per-tab, so
+# locking would take the keyboard away from the user wherever they happen to be
+# — including tabs that have nothing to do with this pane. The cost is that
+# zellij's Ctrl+s (scroll mode) still shadows hunk's Ctrl+S (save note draft),
+# which hunk will not let you remap: press Ctrl+G inside the pane to lock by
+# hand if you need it.
 #
 # Flags (consumed by this script, everything else is a file path):
 #   --staged             review staged changes instead of the working tree
@@ -23,7 +29,8 @@
 #   --name NAME          floating pane title (default: hunk <first file>)
 #   --width/--height N   floating pane size, e.g. 90% or 120 (default 90%/85%)
 #   --hold               keep the pane open after hunk exits
-#   --no-lock            leave zellij's own keybindings live (see below)
+#   --near-current-pane  open in this pane's own tab (the default)
+#   --follow-focus       open in whatever tab the user is looking at instead
 #   --capture FILE       mirror the session's comments to FILE while it lives
 #   --capture-every SECS poll interval for --capture (default 2)
 #   --dry-run            print the zellij command instead of running it
@@ -40,7 +47,7 @@ close_on_exit=1
 dry_run=0
 capture_file=''
 capture_every=2
-lock=1
+near_current=1
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -52,8 +59,8 @@ while [ $# -gt 0 ]; do
     --width) width=${2:-}; shift 2 ;;
     --height) height=${2:-}; shift 2 ;;
     --hold) close_on_exit=0; shift ;;
-    --lock) lock=1; shift ;;
-    --no-lock) lock=0; shift ;;
+    --near-current-pane) near_current=1; shift ;;
+    --follow-focus) near_current=0; shift ;;
     --capture) capture_file=${2:-}; shift 2 ;;
     --capture-every) capture_every=${2:-2}; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
@@ -95,6 +102,10 @@ done
 
 cmd=(zellij action new-pane --floating --cwd "$PWD" --name "$pane_name"
      --width "$width" --height "$height")
+# Anchor placement to $ZELLIJ_PANE_ID rather than to the client's focus, so the
+# pane lands in this agent's tab instead of on top of whatever the user is
+# reading. Floating panes belong to a tab too, so this matters for them as well.
+[ "$near_current" -eq 1 ] && cmd+=(--near-current-pane)
 [ "$close_on_exit" -eq 1 ] && cmd+=(--close-on-exit)
 cmd+=(-- hunk diff)
 [ -n "$target" ] && cmd+=("$target")
@@ -104,10 +115,6 @@ cmd+=(-- "${abs_files[@]}")
 if [ "$dry_run" -eq 1 ]; then
   printf '%q ' "${cmd[@]}"; printf '\n'
   exit 0
-fi
-
-if [ -z "$capture_file" ] && [ "$lock" -eq 0 ]; then
-  exec "${cmd[@]}"
 fi
 
 case $capture_every in
@@ -133,58 +140,70 @@ before=$(session_ids)
 
 "${cmd[@]}" || exit $?
 
-# Zellij's own chords (Ctrl+s -> scroll mode) would otherwise swallow the
-# Ctrl+S that saves a note draft, since hunk treats it as a text-input key and
-# refuses to remap it. Locked mode hands every key to the pane.
-[ "$lock" -eq 1 ] && zellij action switch-mode locked >/dev/null 2>&1
-
-sid=''
-for _ in $(seq 1 40); do
-  for candidate in $(session_ids); do
-    case "
-$before
-" in
-      *"
-$candidate
-"*) : ;;
-      *) sid=$candidate; break 2 ;;
-    esac
-  done
-  sleep 0.25
-done
-
-if [ -z "$sid" ]; then
-  # Without a session id nothing can tell when the pane closes, so locked mode
-  # would strand the session. Give the keys back rather than risk that.
-  [ "$lock" -eq 1 ] && zellij action switch-mode normal >/dev/null 2>&1
-  echo "hunk-pane: pane opened, but no new hunk session appeared — not capturing" >&2
-  exit 0
+# A floating pane created in a tab whose floating panes are toggled off is
+# created *invisible* — the user navigates there and sees nothing. Toggling is
+# per-tab, so this shows them only in the pane's own tab and leaves every other
+# tab (and the user's mode) untouched. One lookup serves both this and the
+# "which tab" message below.
+own_tab_id=''
+own_tab=''
+if [ "$near_current" -eq 1 ] && [ -n "${ZELLIJ_PANE_ID:-}" ] &&
+   command -v jq >/dev/null 2>&1; then
+  read -r own_tab_id own_tab <<EOF
+$(zellij action list-panes -t -j 2>/dev/null |
+  jq -r --argjson p "$ZELLIJ_PANE_ID" \
+    'first(.[] | select(.id == $p and (.is_plugin | not))
+     | "\(.tab_id) \(.tab_name)") // ""' 2>/dev/null)
+EOF
+  [ -n "$own_tab_id" ] &&
+    zellij action show-floating-panes -t "$own_tab_id" >/dev/null 2>&1
+else
+  zellij action show-floating-panes >/dev/null 2>&1
 fi
 
-# Watch the session until the TUI exits: mirror its comments to disk (the
-# session dies with the pane, so the file holds the last successful poll —
-# comments written in the final $capture_every seconds can still be missed) and
-# hand the keyboard back to zellij once it is gone.
-tmp="${capture_file:-/dev/null}.tmp.$$"
-(
-  deadline=$((SECONDS + 28800))
-  while hunk session get "$sid" --json >/dev/null 2>&1; do
-    if [ -n "$capture_file" ] &&
-       out=$(hunk session comment list "$sid" --type all --json 2>/dev/null); then
-      printf '%s\n' "$out" >"$tmp" 2>/dev/null && mv -f "$tmp" "$capture_file" 2>/dev/null
-    fi
-    [ "$SECONDS" -ge "$deadline" ] && break
-    sleep "$capture_every"
+# Only --capture needs the session id: it is what the poller watches. Without it
+# the user keeps the pane open and you read the live session by hand, so there
+# is nothing to wait for here.
+sid=''
+if [ -n "$capture_file" ]; then
+  for _ in $(seq 1 40); do
+    for candidate in $(session_ids); do
+      case "
+$before
+" in
+        *"
+$candidate
+"*) : ;;
+        *) sid=$candidate; break 2 ;;
+      esac
+    done
+    sleep 0.25
   done
-  [ -n "$capture_file" ] && rm -f "$tmp"
-  # Another hunk-pane may still be up and needing the keys; leave it locked.
-  if [ "$lock" -eq 1 ] && [ -z "$(session_ids)" ]; then
-    zellij action switch-mode normal >/dev/null 2>&1
-  fi
-) >/dev/null 2>&1 &
-disown 2>/dev/null || true
 
-msg="hunk-pane: session $sid"
-[ "$lock" -eq 1 ] && msg="$msg -> zellij locked until it closes"
-[ -n "$capture_file" ] && msg="$msg -> capturing comments to $capture_file"
-echo "$msg" >&2
+  if [ -z "$sid" ]; then
+    echo "hunk-pane: pane opened, but no new hunk session appeared — not capturing" >&2
+  else
+    # Watch the session until the TUI exits, mirroring its comments to disk. The
+    # session dies with the pane, so the file holds the last successful poll —
+    # comments written in the final $capture_every seconds can still be missed.
+    tmp="$capture_file.tmp.$$"
+    (
+      deadline=$((SECONDS + 28800))
+      while hunk session get "$sid" --json >/dev/null 2>&1; do
+        if out=$(hunk session comment list "$sid" --type all --json 2>/dev/null); then
+          printf '%s\n' "$out" >"$tmp" 2>/dev/null && mv -f "$tmp" "$capture_file" 2>/dev/null
+        fi
+        [ "$SECONDS" -ge "$deadline" ] && break
+        sleep "$capture_every"
+      done
+      rm -f "$tmp"
+    ) >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+  fi
+fi
+
+parts=''
+[ -n "$sid" ] && parts="session $sid"
+[ -n "$own_tab" ] && parts="${parts:+$parts -> }pane is in tab \"$own_tab\""
+[ -n "$capture_file" ] && parts="${parts:+$parts -> }capturing comments to $capture_file"
+echo "hunk-pane: ${parts:-pane opened}" >&2

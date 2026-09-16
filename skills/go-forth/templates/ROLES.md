@@ -1,10 +1,17 @@
 # Worker roles
 
-> **Non-authoritative.** This gives each phase's agent flavor and role-specific
-> instructions — what it's like to *be* the review agent, that the PR agent should
-> arm a background poller for GitHub comments, and so on. `README.md` owns layout,
-> phase names, and the claim/release mechanics; where the two disagree, `README.md`
-> wins. Treat this as color to fold into a role's prompt, not as a second spec.
+> **This file owns what each phase's agent does** — what it's responsible for,
+> what it is explicitly *not*, and what it's like to be that agent. `README.md`
+> owns layout, phase names, and the claim/release mechanics. Neither file
+> restates the other: on duties this one is authoritative, on mechanics
+> `README.md` is.
+>
+> If the two ever state the same fact two different ways, that is a **bug in one
+> of them**, and not always this one — precedence resolves gaps, not
+> contradictions. Letting it settle a contradiction quietly is how three
+> consecutive slugs once opened their PR a phase early, every agent correctly
+> following the document that happened to be wrong. Stop, log it in
+> `process_improvement.md`, and ask a human which is right.
 
 Every unit of work is a **slug**. The slug *is* the specification — a single document
 that gets written, executed against, and revised as it travels, accreting a new
@@ -13,6 +20,11 @@ one **phase** at a time, and each phase has a **worker role** attached to it: th
 kind of agent that is allowed to claim the slug while it sits there. The role tells
 you what the agent in that phase is responsible for and, just as importantly, what
 it is *not*.
+
+A slug exists only inside a workspace whose `OVERVIEW.md` a human has **approved**
+(`approved:` in that file's front matter — see `README.md`). Before then there is
+nothing for any role below to claim, and writing the first slug is out of order for
+every one of them.
 
 Phases, in the normal forward order:
 
@@ -63,8 +75,9 @@ human skimming `unclaimed/` knows it's ready for sign-off, and release it back
 to `0-open/unclaimed/` exactly as you would with a genuinely open question.
 That is the normal, expected way most specs leave this phase — not a failure.
 
-**Not this role's job:** implementing anything, deciding priority, or deciding
-a spec is ready for implementation.
+**Not this role's job:** implementing anything, deciding priority, deciding
+a spec is ready for implementation, or writing a slug into a workspace whose
+`OVERVIEW.md` isn't approved yet.
 
 ---
 
@@ -148,7 +161,15 @@ Summarize your findings in the slug doc either way, so the destination is legibl
 whoever picks it up next — including a human glancing at `progress.txt` or the doc
 itself, not just the agent.
 
-**Not this role's job:** fixing the code itself.
+A slug injected straight into this phase (the code already existed, so a human
+skipped `0-open`/`1-active`) often carries acceptance criteria addressed to those
+skipped phases — "PR opened", "suite green on the merged tree". Those are not
+yours to meet and not yours to void. Route the slug back one phase with a line
+saying which criterion belongs where, even when the code is clean; see
+`README.md`, "Slugs that enter mid-pipeline".
+
+**Not this role's job:** fixing the code itself, opening the PR, or meeting a
+criterion that belongs to another phase.
 
 ---
 

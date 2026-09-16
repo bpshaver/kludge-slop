@@ -13,7 +13,7 @@ description: Hand a task off to the human to implement themselves — write a sh
 3. Write `USER_HANDOFF_<task-name>.md` describing the task, in the repo root, incorporating whatever preferences and understanding-checks came out of steps 1-2.
 4. Cat the doc's full contents into the conversation, and get explicit confirmation the user understands it — don't start watching until they say so.
 5. If they opted into a skeleton implementation and/or test file, create them now — a bare function stub and, if requested, a failing skeleton test, nothing more.
-6. If they opted into an editor pane, open the task doc and the relevant files (including any skeletons just created) in `$EDITOR` in a new pane.
+6. If they opted into an editor pane, open the task doc and the relevant files (including any skeletons just created) in `$EDITOR` in a new pane, floating or split-right as they chose in step 1 — and tell them which tab it opened in.
 7. Detect (or ask about) lint/test tooling — see [REFERENCE.md](REFERENCE.md).
 8. Start `scripts/watch.sh` via the `Monitor` tool (`persistent: true`) so its output streams into the conversation as commentary — this also watches the task doc itself, not just code, so edits to it (checked-off criteria, questions) show up too.
 
@@ -34,7 +34,7 @@ git rev-parse --is-inside-work-tree
 
 Before drafting the task doc, ask via `AskUserQuestion` — split across two batched calls if more than 4 items apply (max 4 questions per call), rather than as separate conversational back-and-forth:
 
-- **Editor pane** — only include this question if `$ZELLIJ` and `$EDITOR` are both set (see step 6 below); there's nothing to offer otherwise.
+- **Editor pane** — only include this question if `$ZELLIJ` and `$EDITOR` are both set (see step 6 below); there's nothing to offer otherwise. Ask *where* the pane goes as part of this same question rather than a separate one, since the answer decides both. Three options: **"Floating, in my tab"** (recommended — a floating pane over the agent's own tab; nothing covers what they are currently reading), **"Split to the right"** (a tiled pane, but it lands in whatever tab they are looking at when you run it — see step 6 for why the two cannot be combined), and **"No editor pane"**.
 - **Spoken commentary** — do they want noteworthy events also spoken aloud via `say` this session? (See step 7 for what "noteworthy" covers and how long the preference lasts.)
 - **Calibration before the doc is written** — how (if at all) do they want to nail down implementation preferences and confirm they understand the task before you draft the doc? Offer: "Run `/quiz-me`" (only if that skill is available), "Just ask me a few questions here" (a plain substitute — see step 2), and "No, use your judgment" (skip straight to drafting). This is the entry point into step 2, and replaces asking for free-text preferences in isolation — the point isn't just to collect preferences, it's to check the human actually has them clear in their head.
 - **Skeleton implementation file** — offer to create the target file now with just a stub of the function/class named in the task (signature + `raise NotImplementedError` or the language's equivalent, nothing else). Default recommendation is "no" — a bare stub is low-risk, but scaffolding anything more starts prescribing the human's approach, which undercuts the point of them implementing it themselves.
@@ -97,15 +97,27 @@ Tell the human explicitly which file(s) you created and that they're stubs, so i
 
 ### 6. Open an editor pane (optional)
 
-If the user opted into this in step 1, open the task doc alongside the files the human will actually edit — including any skeleton files just created in step 5 — in a new pane:
+If the user opted into this in step 1, open the task doc alongside the files the human will actually edit — including any skeleton files just created in step 5 — in a new pane — using whichever form matches the placement they picked in step 1.
+
+**Floating, in your own tab** (the recommended option):
+
+```bash
+zellij action new-pane --floating --near-current-pane --width 90% --height 85% \
+  -- $EDITOR USER_HANDOFF_<task-name>.md <file-x> <file-y>
+```
+
+**Split to the right**, accepting that it lands in their focused tab:
 
 ```bash
 zellij action new-pane --direction right -- $EDITOR USER_HANDOFF_<task-name>.md <file-x> <file-y>
 ```
 
-- Direction defaults to `right`; ask if the user wants a different layout (`down`, or let Zellij pick the biggest available space by omitting `--direction`).
+- **The two cannot be merged, so the user has to choose.** `--near-current-pane` puts the pane in *your* tab instead of following the user's focus, but on zellij 0.44.3 pairing it with `--direction` fails silently: `new-pane` prints a pane id as if it worked and no pane is created anywhere — no error, nothing in `list-panes` or `dump-layout`. Each flag works alone, and `--floating` composes with `--near-current-pane` fine. That is the whole reason step 1 asks.
+- **Never emit `--near-current-pane --direction ...` together**, whatever the user asks for. If they want both, tell them it silently produces nothing and make them pick.
+- **Say which tab it opened in**, because nothing will visibly happen for the user if they are elsewhere, and this hand-off goes nowhere until they find the editor: `~/.claude/skills/zellij/scripts/own-tab-id --name` for the floating form. For the split-right form it is simply the tab they are already on.
 - `<file-x> <file-y> ...` are whatever files the task doc's Context section calls out as what the human needs to edit — pass the actual paths, not placeholders.
-- This is only tested against Zellij. The same idea should work in tmux (`tmux split-window -h -- $EDITOR ...`) or other multiplexers, but treat that as unverified — confirm with the user before assuming it behaves the same way.
+- The floating form requires zellij **0.44.0+** — that is when `--near-current-pane` landed. On older versions the command fails outright rather than falling back, so drop the flag only if the user is knowingly on an older build and accepts the pane landing in their current tab.
+- This is only tested against Zellij. The same idea should work in tmux (`tmux split-window -h -- $EDITOR ...`) or other multiplexers, but treat that as unverified — confirm with the user before assuming it behaves the same way. Note that tmux has the same focus-vs-caller trap: `split-window` targets the attached client's current window unless you pass `-t "$TMUX_PANE"`. That is untested here.
 
 ### 7. Spoken commentary
 

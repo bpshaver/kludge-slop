@@ -6,9 +6,15 @@ documents live. This file is the authority on *where files live and how state mo
 > **Start here if you are an agent picking up work:** read this file, then read the
 > `OVERVIEW.md` of the feature workspace you were given. If a
 > [`ROLES.md`](ROLES.md) exists, read the section for the phase your slug is in —
-> it gives you flavor and role-specific instructions (e.g. "you are the PR agent;
-> arm a background poller for GitHub comments"). `ROLES.md` is a first draft and does
-> not override anything in this file; if the two disagree, this file wins.
+> it tells you what that phase's agent is responsible for and what it is not.
+>
+> **The two files own different things and never restate each other.**
+> `ROLES.md` owns *what each phase's agent does*; this file owns *where files
+> live and how state moves* — layout, claiming, front matter, liveness,
+> messaging. On duties `ROLES.md` is authoritative; on mechanics this file is.
+> If they ever state the same fact two different ways, that is a **bug in one of
+> them** — precedence is for gaps, not for contradictions. Stop, note it in
+> `process_improvement.md`, and ask a human which one is right.
 
 It is:
 
@@ -60,7 +66,8 @@ startup and never looks outside it.
       workers/
         <session-id>/messages.txt    # one inbox per live agent (global; see Messaging)
       <feature-slug>/                # a workspace
-        OVERVIEW.md                  # feature intent, target branch; human-owned
+        OVERVIEW.md                  # feature intent, target branch; human-owned,
+                                     #   and human-approved before any slug exists
         progress.txt                 # sparse high-signal feed for this feature
         0-open/          unclaimed/ claimed/
         1-active/        unclaimed/ claimed/
@@ -82,6 +89,7 @@ exactly one winner and the loser gets `ENOENT`. That is the entire concurrency
 mechanism: there is no locking, and no state change is ever a read-modify-write.
 
     claim    mv 2-ai-review/unclaimed/<slug>.md  2-ai-review/claimed/<slug>.md
+             (and create your inbox in the same breath — see Messaging)
     advance  mv 2-ai-review/claimed/<slug>.md    3-human-review/unclaimed/<slug>.md
     release  mv 2-ai-review/claimed/<slug>.md    2-ai-review/unclaimed/<slug>.md
     reclaim  (same as release, when the owner is dead — see Liveness)
@@ -112,14 +120,16 @@ Scan **highest phase first**, and within a phase take dead claims before the que
 Stop at the first hit. Finishing work beats starting work: review-phase slugs are
 closest to delivering value, and PRs rot while their branch drifts from its base.
 
-"Move forward" means something different per phase:
+"Move forward" means something different per phase. **`ROLES.md` defines each
+phase's job** — the table below maps transitions and the gating invariants this
+file owns, and deliberately does not restate those definitions:
 
-| Phase | Move forward means | Then |
-|---|---|---|
-| `0-open` | write the spec: goal, acceptance criteria, constraints — **and get `ready-for-implementation:` set** | → `1-active` |
-| `1-active` | implement it (commit to `branch:`, push, but **no PR yet**) | → `2-ai-review` |
-| `2-ai-review` | review the code **locally** — diff the branch against `target-branch`, not a GitHub PR — address findings | → `3-human-review` |
-| `3-human-review` | **open the PR against `target-branch`**, then poll it for human comments, respond, push fixes | → `4-closed` |
+| Phase | Role (see `ROLES.md`) | Gate this file owns | Then |
+|---|---|---|---|
+| `0-open` | the specification agent | `ready-for-implementation:` is set | → `1-active` |
+| `1-active` | the implementing agent | commit to `branch:` and push — **no PR yet** | → `2-ai-review` |
+| `2-ai-review` | the review agent | reviews the branch **locally**, never a PR | → `1-active` / `0-open` / `3-human-review` |
+| `3-human-review` | the PR agent | **the PR is opened here, and not before** | → `4-closed` |
 
 A spec being *sufficient* and a spec being *ready-for-implementation* are two
 different gates — see below.
@@ -132,6 +142,26 @@ review is happening on an **external system** (the GitHub PR) for the first
 time. The owner is still an agent — its job is *responding* to review, not
 waiting passively. That is why `pr:` and `branch:` are load-bearing: they are
 all a fresh agent has to go on.
+
+### Slugs that enter mid-pipeline
+
+A human may drop a slug straight into a later phase when the work already exists
+— code sitting on a branch, a design already written — instead of back-filling it
+through `0-open`/`1-active`. The slug's *phase* is then right, but its acceptance
+criteria are usually written for the whole job, including phases it will never
+walk. A `2-ai-review` agent inherits "full test suite passes on the merged tree";
+that is `1-active` work, and this role is explicitly barred from doing it.
+
+**A criterion you are barred from meeting is grounds to route the slug back one
+phase** — clean code or not, findings or no findings. Append a line naming which
+criterion belongs to which phase, then `mv` it back.
+
+Never delete or tick off a criterion to make it fit the phase you are in.
+Criteria are the human's statement of what the work is; an agent that may retire
+an inconvenient one has a general-purpose escape hatch from any work it doesn't
+feel like doing. Whoever injects a slug can spare the bounce by stripping the
+criteria that belong to skipped phases at injection time — but the receiving
+agent never needs to wait for that.
 
 ### Cooldown
 
@@ -187,10 +217,37 @@ The field holds one of two things:
   check this automatically. It stays blocking until a human, or an agent acting on
   new information, clears it by hand.
 
+**Blocked by more than one thing: separate the clauses with `;`.** Each clause
+resolves independently by the two rules above, and the slug becomes actionable
+only once every clause has:
+
+    block-by: pipeline-artifact; waiting on cf-argo PR #198
+
+Use `;` and nothing else. A comma, an "and", or a sentence joining two
+conditions is a *single opaque free-text blocker*: it can never self-resolve,
+nothing errors, and the slug quietly drops out of every future scan — a stall
+that looks exactly like an empty queue. This is enforced: a `PreToolUse` hook
+rejects a `block-by:` that looks compound but isn't `;`-separated.
+
 Clearing a `block-by:` you didn't set is a front-matter edit, so it follows the same
 rule as everything else here: claim the slug first (`mv ... claimed/`), edit the
 field, then either keep going or release it back to `unclaimed/` — never edit a
 field on a file you don't hold.
+
+### Human-in-the-loop
+
+`hitl:` in front matter marks a slug only a human-driven session may work. It is
+not a weaker `block-by:` — a blocked slug isn't actionable by anyone, an `hitl:`
+slug is perfectly actionable *with a human in the loop*:
+
+- Running **unattended** — headless, cron, an AFK runner, any fully-bypassed
+  autonomous loop — skip any slug with a non-empty `hitl:`, exactly as you skip a
+  blocked one. Say so if something made it look actionable; don't claim it.
+- Running **with a human in the session** — claim and work it normally. That is
+  what the field is for.
+
+Saying `Type: HITL` in the slug's prose does nothing. The scan reads front
+matter, so a marker anywhere else is a note to humans, not a rule.
 
 ### Ready for implementation
 
@@ -231,7 +288,8 @@ Front matter:
     ---
     owner: <session id, empty when unclaimed — see Liveness>
     pid: <process id of the owning agent, empty when unclaimed>
-    block-by: <another slug's name, or free text, or empty — see Blocked>
+    block-by: <a slug name, `;`-separated clauses, free text, or empty — see Blocked>
+    hitl: <non-empty if only a human-driven session may work this — see Human-in-the-loop>
     ready-for-implementation: <empty until a human sets it — see Ready for implementation>
     branch: <branch name, once one exists>
     worktree: <absolute path, once one exists>
@@ -249,14 +307,59 @@ human is fine too — the point is it isn't a slug-holding worker). It carries w
 every slug in the feature must agree on:
 
     ---
-    target-branch: release/v0.0.9
+    target-branch: <the one branch every slug in this feature builds on and PRs into>
     issue: <url, if there is one>
+    approved: <empty until a human approves this overview — see below>
     ---
+
+Resolve `target-branch` from the repo's own conventions (`AGENTS.md` / `CLAUDE.md`)
+at the time the workspace is created — never copy a version number out of this
+template, and re-check it before a long-lived workspace opens its next PR, since
+release branches get cut, merged, and deleted underneath you.
 
 ...then the intent of the feature, its scope, and any constraint that spans slugs.
 Read it before claiming anything. An agent that thinks it should change something
 proposes that in its own slug doc under a `## Proposed overview changes` heading —
 it does not edit `OVERVIEW.md` directly.
+
+### Approval gates the first slug
+
+`approved:` works exactly like `ready-for-implementation:` on a slug, one level
+up: **empty means not approved, and only a human sets it.** An agent never sets
+it, including the agent that drafted the overview.
+
+**Write no slug into a workspace whose `approved:` is empty.** Until a human
+sets it, the workspace holds `OVERVIEW.md` and nothing else — no slug docs, and
+no scaffolded phase directories to put them in. Discuss the slugs you have in
+mind with the human in conversation, or sketch them inside the draft overview
+itself; do not create the files.
+
+Three reasons this gate is worth the wait:
+
+- Slugs inherit their scope, target branch, and cross-cutting constraints from
+  the overview. Every slug written against a draft has to be re-read, and often
+  rewritten, once the human moves a boundary.
+- The phase machinery is autonomous. A slug in `0-open/unclaimed/` is an
+  invitation, and a headless agent will accept it — grilling a human, splitting
+  tickets, and spending real work on a premise nobody signed off on.
+- The overview is the human's statement of what the feature *is*. Slugs written
+  first quietly become that statement instead, and the human ends up reviewing
+  an agent's decomposition rather than writing the intent.
+
+Once `approved:` is set (`yes` is enough; a short note is fine too), the
+workspace is open for business: scaffold the phase directories if they aren't
+there yet, and write slugs normally. Approval is per-workspace and does not
+expire — a later change of direction is an ordinary edit to `OVERVIEW.md`, not
+a re-approval.
+
+An agent that finds slugs already sitting in a workspace with an empty
+`approved:` has found a real inconsistency: say so, and ask the human whether to
+approve the overview or bin the slugs. Don't set the field yourself to make the
+contradiction go away.
+
+A workspace with **no `approved:` field at all** pre-dates this rule. Treat its
+existing slugs as approved and keep working them, but mention the missing field
+so the human can add it; don't start a *new* slug there until they have.
 
 ## Liveness
 
@@ -265,12 +368,25 @@ Claude Code, mint a short unique id for the process (e.g. `pi-b85054f6`) and use
 that. Either way, identity is per-*process*, not per treehouse lease — leases are
 recycled from a pool, so a lease name can belong to a different agent an hour later.
 
-A claim is dead when its `pid:` is gone:
+A claim is dead only when **both** signals say so:
 
-    kill -0 <pid> 2>/dev/null || echo dead
+    kill -0 <pid> 2>/dev/null || echo pid-unreachable   # 1. process not visible
+    find <slug>.md -mmin +30 | grep -q . && echo stale  # 2. and doc untouched
 
-This fails safe: a recycled pid reads as alive, so you leave a slug claimed rather
-than stealing it from a live agent.
+`kill -0` on its own is not enough, and reading it as "alive or dead" is wrong.
+It answers *"is this pid visible from where I am running?"* — three states
+collapse into two, because **alive-but-invisible fails identically to dead**. An
+interactive session and a headless runner routinely share a `PLANNING_DOCS/`
+without sharing a process table, and the probe then reports a perfectly healthy
+owner as gone. The failure is one-sided: a recycled pid reading as alive is
+harmless (you leave the slug alone), while a live pid reading as dead costs you
+the thing this mechanism exists to protect — you steal a working agent's slug and
+act on stale information, on GitHub, where it is visible.
+
+The doc's mtime is the second signal, and it is observer-independent: a working
+owner appends as it goes. Unreachable pid **and** a doc untouched for 30 minutes
+is a real death. Either one alone is not — if the pid is unreachable but the doc
+is fresh, leave the claim and pick something else.
 
 Reclaiming a dead claim is **not** the same as picking up a clean queue entry. The
 dead agent's side effects live outside this directory — a pushed branch, an open PR,
@@ -302,11 +418,25 @@ before writing.
 
 ## Messaging
 
-Each agent owns an inbox at `PLANNING_DOCS/workers/<session-id>/messages.txt`. On
-startup:
+Each agent owns an inbox at `PLANNING_DOCS/workers/<session-id>/messages.txt`.
+**Creating it is part of claiming** — one gesture with the `mv`, not a startup
+step to remember separately:
 
+    mv 1-active/unclaimed/<slug>.md 1-active/claimed/<slug>.md
     mkdir -p "PLANNING_DOCS/workers/$SESSION_ID"
     touch    "PLANNING_DOCS/workers/$SESSION_ID/messages.txt"
+
+Holding a claim with no inbox means the one way to reach you doesn't exist, and a
+sender can't distinguish that from silence — a workspace-wide direction change
+then has nowhere to go but `progress.txt` and hope. A sender creating the missing
+directory doesn't fix it either: that solves delivery, not reading, and an agent
+that never made an inbox has no reason to look in one.
+
+If you find a **claimed** slug whose owner has no inbox, note it in the doc
+("owner `<id>` has no inbox — unreachable") and pick something else. **It is not
+grounds to reclaim.** A missing directory says nothing about whether that agent is
+alive; liveness has its own two signals above, and this one would fire only
+against runners that create inboxes by hand.
 
 One reader, many appenders. To reach whoever is working a slug, read `owner:` from
 its front matter and append one line to that inbox. Use it only when another agent
@@ -348,6 +478,25 @@ changed, something every agent working this feature would want to know. Append w
 
 The narrative of *how* work went belongs in the slug document, not here. This file
 exists so an agent can catch up on the feature in a few lines.
+
+**Keep it short by promoting, not by accumulating.** As it grows, anything still
+*binding* — a decision several slugs depend on, a direction that still holds —
+belongs somewhere durable: the slug doc that owns it, or a `## Proposed overview
+changes` note for `OVERVIEW.md`. Once it lives there, append a line saying so:
+
+    [ts] <you>: promoted the collect_pipeline rejection decision into
+    <slug>.md; entries above 2026-07-30 are trimmable
+
+Agents promote and mark; **the human truncates.** Trimming is a read-modify-write
+of a multi-writer log — precisely what the hook blocks — so an agent doing it
+through the shell would silently eat any append that landed mid-operation.
+
+**A question two slugs both need answered is the common case.** Answer it once,
+say in `progress.txt` which slug owns the answer, and put a pointer in the *other*
+slug's doc. The pointer is the part that matters: `progress.txt` only reaches
+agents that start after it was written, and sibling slugs have no ordering
+guarantee — both can already be in flight, each about to answer the same question
+its own way, with nothing detecting the conflict.
 
 ## process_improvement.md
 
