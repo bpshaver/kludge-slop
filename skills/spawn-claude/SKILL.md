@@ -41,6 +41,8 @@ zellij action new-tab --close-on-exit --no-focus --name "$name" --cwd "$cwd" \
 | `--model`   | no       | Claude's default | Passed to `claude --model`                           |
 | `--cwd`     | no       | current dir      | Working directory for the tab and the session        |
 | `--add-dir` | no       |                  | Extra directory to allow; repeatable                 |
+| `--permission-mode` | no | Claude's default | Passed to `claude --permission-mode`, e.g. `auto` |
+| `--interactive` | no | off | The user talks to this session directly. Without it, the session gets `CLAUDE_SPAWNED_WORKER=1`, so attention hooks stay quiet. |
 | `-- <text>` | yes      |                  | The first prompt                                     |
 
 ## Workflow
